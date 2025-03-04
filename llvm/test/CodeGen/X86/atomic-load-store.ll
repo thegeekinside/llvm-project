@@ -174,8 +174,8 @@ define <1 x float> @atomic_vec1_float(ptr %x) {
   ret <1 x float> %ret
 }
 
-define <1 x double> @atomic_vec1_double_align(ptr %x) nounwind {
-; CHECK-LABEL: atomic_vec1_double_align:
+define <1 x double> @atomic_vec1_double(ptr %x) nounwind {
+; CHECK-LABEL: atomic_vec1_double:
 ; CHECK:       ## %bb.0:
 ; CHECK-NEXT:    movsd {{.*#+}} xmm0 = mem[0],zero
 ; CHECK-NEXT:    retq
