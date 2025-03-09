@@ -13,6 +13,7 @@
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/MemRef/Utils/MemRefUtils.h"
 #include "mlir/Dialect/Utils/IndexingUtils.h"
@@ -23,6 +24,100 @@ using namespace mlir;
 namespace mlir {
 namespace memref {
 namespace {
+struct AllocOpInterface
+    : public RuntimeVerifiableOpInterface::ExternalModel<AllocOpInterface,
+                                                         AllocOp> {
+  void generateRuntimeVerification(Operation *op, OpBuilder &builder,
+                                   Location loc) const {
+    auto moduleOp = op->getParentOfType<ModuleOp>();
+    builder.setInsertionPointToStart(&moduleOp.getBodyRegion().front());
+    std::string errorMessage =
+        RuntimeVerifiableOpInterface::generateErrorMessage(
+            op, "memory leak detected");
+    SmallVector<uint8_t> elementVals;
+    elementVals.append(errorMessage.begin(), errorMessage.end());
+    elementVals.push_back('\0');
+    auto dataAttrType = RankedTensorType::get(
+        {static_cast<int64_t>(elementVals.size())}, builder.getI8Type());
+    auto dataAttr =
+        DenseElementsAttr::get(dataAttrType, llvm::ArrayRef(elementVals));
+    MemRefType constType = MemRefType::get(
+        {static_cast<int64_t>(elementVals.size())}, builder.getI8Type());
+    auto global = builder.create<memref::GlobalOp>(
+        loc, (Twine("__constant_")).str(),
+        /*sym_visibility=*/builder.getStringAttr("private"),
+        /*type=*/constType,
+        /*initial_value=*/dataAttr,
+        /*constant=*/true,
+        /*alignment=*/IntegerAttr());
+
+    builder.setInsertionPointAfter(op);
+    auto allocOp = cast<AllocOp>(op);
+    MemRefType type = allocOp.getType();
+    Value unrankedMemref = builder.create<CastOp>(
+        loc,
+        UnrankedMemRefType::get(type.getElementType(), type.getMemorySpace()),
+        allocOp.getResult());
+    Value getGlobal =
+        builder.create<GetGlobalOp>(loc, constType, "__constant_");
+    Value unrankedGetGlobal = builder.create<CastOp>(
+        loc,
+        UnrankedMemRefType::get(constType.getElementType(),
+                                constType.getMemorySpace()),
+        getGlobal);
+    builder.create<func::CallOp>(
+        loc, /*callee=*/"notifyMemrefAllocated", /*results=*/TypeRange(),
+        /*operands=*/ValueRange{unrankedMemref, unrankedGetGlobal});
+  }
+};
+
+struct DeallocOpInterface
+    : public RuntimeVerifiableOpInterface::ExternalModel<DeallocOpInterface,
+                                                         DeallocOp> {
+  void generateRuntimeVerification(Operation *op, OpBuilder &builder,
+                                   Location loc) const {
+    auto moduleOp = op->getParentOfType<ModuleOp>();
+    builder.setInsertionPointToStart(&moduleOp.getBodyRegion().front());
+    std::string errorMessage =
+        RuntimeVerifiableOpInterface::generateErrorMessage(
+            op, "attempting to free non-allocated memory");
+    SmallVector<uint8_t> elementVals;
+    elementVals.append(errorMessage.begin(), errorMessage.end());
+    elementVals.push_back('\0');
+    auto dataAttrType = RankedTensorType::get(
+        {static_cast<int64_t>(elementVals.size())}, builder.getI8Type());
+    auto dataAttr =
+        DenseElementsAttr::get(dataAttrType, llvm::ArrayRef(elementVals));
+    MemRefType constType = MemRefType::get(
+        {static_cast<int64_t>(elementVals.size())}, builder.getI8Type());
+    auto global = builder.create<memref::GlobalOp>(
+        loc, (Twine("__constant2_")).str(),
+        /*sym_visibility=*/builder.getStringAttr("private"),
+        /*type=*/constType,
+        /*initial_value=*/dataAttr,
+        /*constant=*/true,
+        /*alignment=*/IntegerAttr());
+
+    builder.setInsertionPointAfter(op);
+    auto deallocOp = cast<DeallocOp>(op);
+    MemRefType type = cast<MemRefType>(deallocOp.getMemref().getType());
+    Value unrankedMemref = builder.create<CastOp>(
+        loc,
+        UnrankedMemRefType::get(type.getElementType(), type.getMemorySpace()),
+        deallocOp.getMemref());
+    Value getGlobal =
+        builder.create<GetGlobalOp>(loc, constType, "__constant2_");
+    Value unrankedGetGlobal = builder.create<CastOp>(
+        loc,
+        UnrankedMemRefType::get(constType.getElementType(),
+                                constType.getMemorySpace()),
+        getGlobal);
+    builder.create<func::CallOp>(
+        loc, /*callee=*/"notifyMemrefDeallocated", /*results=*/TypeRange(),
+        /*operands=*/ValueRange{unrankedMemref, unrankedGetGlobal});
+  }
+};
+
 struct CastOpInterface
     : public RuntimeVerifiableOpInterface::ExternalModel<CastOpInterface,
                                                          CastOp> {
@@ -334,6 +429,8 @@ struct ExpandShapeOpInterface
 void mlir::memref::registerRuntimeVerifiableOpInterfaceExternalModels(
     DialectRegistry &registry) {
   registry.addExtension(+[](MLIRContext *ctx, memref::MemRefDialect *dialect) {
+    AllocOp::attachInterface<AllocOpInterface>(*ctx);
+    DeallocOp::attachInterface<DeallocOpInterface>(*ctx);
     CastOp::attachInterface<CastOpInterface>(*ctx);
     ExpandShapeOp::attachInterface<ExpandShapeOpInterface>(*ctx);
     LoadOp::attachInterface<LoadStoreOpInterface<LoadOp>>(*ctx);

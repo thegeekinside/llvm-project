@@ -15,6 +15,7 @@
 
 #include "mlir/ExecutionEngine/RunnerUtils.h"
 #include <chrono>
+#include <unordered_map>
 
 // NOLINTBEGIN(*-identifier-naming)
 
@@ -325,6 +326,48 @@ extern "C" int64_t verifyMemRefC64(int64_t rank, void *actualPtr,
   UnrankedMemRefType<impl::complex64> actualDesc = {rank, actualPtr};
   UnrankedMemRefType<impl::complex64> expectedDesc = {rank, expectedPtr};
   return _mlir_ciface_verifyMemRefC64(&actualDesc, &expectedDesc);
+}
+
+class AllocationManager {
+public:
+  ~AllocationManager() {
+    for (auto it = allocs.begin(); it != allocs.end(); it++) {
+      printf("LEAK DETECTED: %p\n", it->first);
+      printf("%s\n", it->second.c_str());
+    }
+  }
+
+  void notifyAlloc(void *ptr, void *msg) {
+    allocs[ptr] = std::string(reinterpret_cast<char *>(msg));
+  }
+
+  void notifyDealloc(void *ptr, void *msg) {
+    auto it = allocs.find(ptr);
+    if (it == allocs.end()) {
+      printf("%s\n", static_cast<char *>(msg));
+    } else {
+      allocs.erase(it);
+    }
+  }
+
+private:
+  std::unordered_map<void *, std::string> allocs;
+};
+
+AllocationManager x;
+
+extern "C" void
+_mlir_ciface_notifyMemrefAllocated(UnrankedMemRefType<void> *M,
+                                   UnrankedMemRefType<int8_t> *msg) {
+  DynamicMemRefType<int8_t> msgMemref(*msg);
+  x.notifyAlloc(M, msgMemref.data);
+}
+
+extern "C" void
+_mlir_ciface_notifyMemrefDeallocated(UnrankedMemRefType<void> *M,
+                                     UnrankedMemRefType<int8_t> *msg) {
+  DynamicMemRefType<int8_t> msgMemref(*msg);
+  x.notifyDealloc(M, msgMemref.data);
 }
 
 // NOLINTEND(*-identifier-naming)
